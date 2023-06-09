@@ -6,7 +6,7 @@ from langchain.agents import (
 )
 from langchain.prompts import BaseChatPromptTemplate
 from langchain import SerpAPIWrapper, LLMChain
-from langchain.chat_models import ChatOpenAI
+from langchain.chat_models import AzureChatOpenAI
 from typing import List, Union
 from langchain.schema import AgentAction, AgentFinish, HumanMessage
 from langchain.memory import ConversationBufferWindowMemory
@@ -17,6 +17,45 @@ import streamlit as st
 from database import get_redis_results, get_redis_connection
 from config import RETRIEVAL_PROMPT, CHAT_MODEL, INDEX_NAME, SYSTEM_PROMPT
 
+import os
+import typing
+import time
+import requests
+if typing.TYPE_CHECKING:
+    from azure.core.credentials import TokenCredential
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+openai.api_version = '2023-05-15'
+openai.api_base = 'https://ruslany-openai.openai.azure.com/'
+
+from azure.identity import DefaultAzureCredential
+
+default_credential = DefaultAzureCredential()
+token = default_credential.get_token("https://cognitiveservices.azure.com/.default")
+
+openai.api_type = 'azure_ad'
+openai.api_key = token.token
+
+class TokenRefresh(requests.auth.AuthBase):
+
+    def __init__(self, credential: "TokenCredential", scopes: typing.List[str]) -> None:
+        self.credential = credential
+        self.scopes = scopes
+        self.cached_token: typing.Optional[str] = None
+
+    def __call__(self, req):
+        if not self.cached_token or self.cached_token.expires_on - time.time() < 300:
+            self.cached_token = self.credential.get_token(*self.scopes)
+        req.headers["Authorization"] = f"Bearer {self.cached_token.token}"
+        return req
+
+session = requests.Session()
+session.auth = TokenRefresh(default_credential, ["https://cognitiveservices.azure.com/.default"])
+
+openai.requestssession = session
 
 redis_client = get_redis_connection()
 
@@ -35,7 +74,12 @@ def answer_user_question(query):
         SEARCH_QUERY_HERE=query, SEARCH_CONTENT_HERE=search_content
     )
 
+    # save retreval_prepped to file
+    with open("retrieval_prepped.txt", "w") as f: # write in file
+        f.write(retrieval_prepped)
+
     retrieval = openai.ChatCompletion.create(
+        deployment_id="gpt-35-turbo",
         model=CHAT_MODEL,
         messages=[{"role": "user", "content": retrieval_prepped}],
         max_tokens=500,
@@ -55,6 +99,7 @@ def answer_question_hyde(query):
     Answer:"""
 
     hypothetical_answer = openai.ChatCompletion.create(
+        deployment_id="gpt-35-turbo",
         model=CHAT_MODEL,
         messages=[
             {
@@ -76,6 +121,7 @@ def answer_question_hyde(query):
         "SEARCH_CONTENT_HERE", search_content
     )
     retrieval = openai.ChatCompletion.create(
+        deployment_id="gpt-35-turbo",
         model=CHAT_MODEL,
         messages=[{"role": "user", "content": retrieval_prepped}],
         max_tokens=500,
@@ -149,7 +195,13 @@ def initiate_agent(tools):
 
     output_parser = CustomOutputParser()
 
-    llm = ChatOpenAI(temperature=0)
+    llm = AzureChatOpenAI(temperature=0, 
+                          openai_api_base=os.getenv('AZURE_OPENAI_ENDPOINT'),
+                          openai_api_key=os.getenv('AZURE_OPENAI_KEY'),
+                          openai_api_version=openai.api_version,
+                          openai_api_type="azure",
+                          deployment_name="gpt-35-turbo"
+    )
 
     # LLM chain consisting of the LLM and a prompt
     llm_chain = LLMChain(llm=llm, prompt=prompt)
@@ -171,6 +223,7 @@ def initiate_agent(tools):
 
 def ask_gpt(query):
     response = openai.ChatCompletion.create(
+        deployment_id="gpt-35-turbo",
         model=CHAT_MODEL,
         messages=[
             {

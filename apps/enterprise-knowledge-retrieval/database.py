@@ -28,7 +28,7 @@ def query_redis(redis_conn, query, index_name, top_k=5):
 
     ## Creates embedding vector from user query
     embedded_query = np.array(
-        openai.Embedding.create(input=query, model=EMBEDDINGS_MODEL,)["data"][
+        openai.Embedding.create(deployment_id="text-embedding-ada-002",input=query, model=EMBEDDINGS_MODEL,)["data"][
             0
         ]["embedding"],
         dtype=np.float32,
