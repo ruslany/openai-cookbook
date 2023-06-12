@@ -5,6 +5,7 @@ from redis import Redis
 from redis.commands.search.field import VectorField
 from redis.commands.search.field import TextField, NumericField
 from redis.commands.search.query import Query
+from config import AZURE_OPENAI_API_KEY, AZURE_OPENAI_BASE_URL, AZURE_OPENAI_CHAT_DEPLOYMENT_NAME, AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME
 
 from config import EMBEDDINGS_MODEL, PREFIX, VECTOR_FIELD_NAME
 
@@ -43,11 +44,15 @@ def load_vectors(client:Redis, input_list, vector_field_name):
 
 # Make query to Redis
 def query_redis(redis_conn,query,index_name, top_k=2):
-    
-    
 
+    openai.api_version = '2023-05-15'
+    openai.api_type = 'azure'
+    openai.api_key = AZURE_OPENAI_API_KEY
+    openai.api_base = AZURE_OPENAI_BASE_URL
+
+    
     ## Creates embedding vector from user query
-    embedded_query = np.array(openai.Embedding.create(
+    embedded_query = np.array(openai.Embedding.create(deployment_id=AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME,
                                                 input=query,
                                                 model=EMBEDDINGS_MODEL,
                                             )["data"][0]['embedding'], dtype=np.float32).tobytes()
