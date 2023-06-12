@@ -3,8 +3,17 @@ from numpy import array, average
 import openai
 import pandas as pd
 import numpy as np
+from tenacity import retry, wait_random_exponential, stop_after_attempt
+import tiktoken
+from typing import List, Iterator
+import concurrent
+
+from tqdm import tqdm
 
 from config import TEXT_EMBEDDING_CHUNK_SIZE, EMBEDDINGS_MODEL
+
+from config import AZURE_OPENAI_API_KEY, AZURE_OPENAI_BASE_URL, AZURE_OPENAI_CHAT_DEPLOYMENT_NAME, AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME
+
 from database import load_vectors
 
 def get_col_average_from_list_of_lists(list_of_lists):
@@ -18,22 +27,95 @@ def get_col_average_from_list_of_lists(list_of_lists):
 
 # Create embeddings for a text using a tokenizer and an OpenAI engine
 
-
 def create_embeddings_for_text(text, tokenizer):
     """Return a list of tuples (text_chunk, embedding) and an average embedding for a text."""
     token_chunks = list(chunks(text, TEXT_EMBEDDING_CHUNK_SIZE, tokenizer))
     text_chunks = [tokenizer.decode(chunk) for chunk in token_chunks]
 
-    embeddings_response = get_embeddings(text_chunks, EMBEDDINGS_MODEL)
-    embeddings = [embedding["embedding"] for embedding in embeddings_response]
+    #embeddings_response = get_embeddings(text_chunks, EMBEDDINGS_MODEL)
+    embeddings = embed_corpus(text_chunks, 1)
+    #embeddings = [embedding["embedding"] for embedding in embeddings_response]
+    #embeddings = [embedding["embedding"] for embedding in embeddings]
     text_embeddings = list(zip(text_chunks, embeddings))
 
     average_embedding = get_col_average_from_list_of_lists(embeddings)
 
     return (text_embeddings, average_embedding)
 
+def init_openai_api(api_version = '2023-05-15'):
+    openai.api_version = api_version
+    openai.api_type = 'azure'
+    openai.api_key = AZURE_OPENAI_API_KEY
+    openai.api_base = AZURE_OPENAI_BASE_URL
+
 def get_embeddings(text_array, engine):
-    return openai.Engine(id=engine).embeddings(input=text_array)["data"]
+    response = openai.Embedding.create(deployment_id = AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME,
+        input=text_array,
+        model=engine,
+    )["data"]
+    
+    return response
+    
+    #return [data["embedding"] for data in response]
+    #return openai.Engine(id=engine).embeddings(input=text_array)["data"]
+
+## Batch Embedding Logic
+
+# Simple function to take in a list of text objects and return them as a list of embeddings
+@retry(wait=wait_random_exponential(min=1, max=40), stop=stop_after_attempt(10))
+def get_embeddings(input: List):
+    response = openai.Embedding.create(deployment_id = "text-embedding-ada-002",
+        input=input,
+        model=EMBEDDINGS_MODEL,
+    )["data"]
+    return [data["embedding"] for data in response]
+
+def batchify(iterable, n=1):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx : min(ndx + n, l)]
+
+# Function for batching and parallel processing the embeddings
+def embed_corpus(
+    corpus: List[str],
+    batch_size=1,
+    num_workers=8,
+    max_context_len=8191,
+):
+
+    # Encode the corpus, truncating to max_context_len
+    encoding = tiktoken.get_encoding("cl100k_base")
+    encoded_corpus = [
+        encoded_article[:max_context_len] for encoded_article in encoding.encode_batch(corpus)
+    ]
+
+    # Calculate corpus statistics: the number of inputs, the total number of tokens, and the estimated cost to embed
+    num_tokens = sum(len(article) for article in encoded_corpus)
+    cost_to_embed_tokens = num_tokens / 1_000 * 0.0004
+    print(
+        f"num_articles={len(encoded_corpus)}, num_tokens={num_tokens}, est_embedding_cost={cost_to_embed_tokens:.2f} USD"
+    )
+
+    # Embed the corpus
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        
+        futures = [
+            executor.submit(get_embeddings, text_batch)
+            for text_batch in batchify(encoded_corpus, batch_size)
+        ]
+
+        with tqdm(total=len(encoded_corpus)) as pbar:
+            for _ in concurrent.futures.as_completed(futures):
+                pbar.update(batch_size)
+
+        embeddings = []
+        for future in futures:
+            data = future.result()
+            embeddings.extend(data)
+
+        return embeddings
+
+
 
 # Split a text into smaller chunks of size n, preferably ending at the end of a sentence
 def chunks(text, n, tokenizer):
